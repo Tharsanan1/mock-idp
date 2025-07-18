@@ -1,13 +1,17 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"log"
 	"math/big"
+	"crypto/rand"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,11 +23,39 @@ var (
 	keyID      = "mock-key-id"
 )
 
+// type fixedReader struct {
+//     src *rand.Rand
+// }
+
+// func (f *fixedReader) Read(p []byte) (n int, err error) {
+//     for i := range p {
+//         p[i] = byte(f.src.Intn(256))
+//     }
+//     return len(p), nil
+// }
+
+
 func main() {
 	var err error
-	privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+	// seed := int64(12345678) // fixed seed for reproducibility
+    // src := rand.New(rand.NewSource(seed))
+    // fixedRandReader := &fixedReader{src}
+	// privateKey, err = rsa.GenerateKey(fixedRandReader, 2048)
+	// if err != nil {
+	// 	log.Fatalf("Failed to generate key: %v", err)
+	// }
+
+	// Try load, else generate and save
+	privateKey, err := loadPrivateKey("private.pem")
 	if err != nil {
-		log.Fatalf("Failed to generate key: %v", err)
+		privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			panic(err)
+		}
+		err = savePrivateKey(privateKey, "private.pem")
+		if err != nil {
+			panic(err)
+		}
 	}
 	publicKey = &privateKey.PublicKey
 
@@ -82,4 +114,33 @@ func jwksHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(jwks)
+}
+
+
+// Save private key to file in PEM format
+func savePrivateKey(key *rsa.PrivateKey, filename string) error {
+    keyBytes := x509.MarshalPKCS1PrivateKey(key)
+    pemBlock := &pem.Block{
+        Type:  "RSA PRIVATE KEY",
+        Bytes: keyBytes,
+    }
+    file, err := os.Create(filename)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+    return pem.Encode(file, pemBlock)
+}
+
+// Load private key from PEM file
+func loadPrivateKey(filename string) (*rsa.PrivateKey, error) {
+    data, err := os.ReadFile(filename)
+    if err != nil {
+        return nil, err
+    }
+    block, _ := pem.Decode(data)
+    if block == nil || block.Type != "RSA PRIVATE KEY" {
+        return nil, fmt.Errorf("failed to decode PEM block containing private key")
+    }
+    return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
