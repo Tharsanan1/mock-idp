@@ -1,15 +1,17 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/big"
-	"crypto/rand"
 	"net/http"
 	"os"
 	"time"
@@ -23,40 +25,42 @@ var (
 	keyID      = "mock-key-id"
 )
 
-// type fixedReader struct {
-//     src *rand.Rand
-// }
-
-// func (f *fixedReader) Read(p []byte) (n int, err error) {
-//     for i := range p {
-//         p[i] = byte(f.src.Intn(256))
-//     }
-//     return len(p), nil
-// }
-
-
 func main() {
-	var err error
-	// seed := int64(12345678) // fixed seed for reproducibility
-    // src := rand.New(rand.NewSource(seed))
-    // fixedRandReader := &fixedReader{src}
-	// privateKey, err = rsa.GenerateKey(fixedRandReader, 2048)
+	// var err error
+	// seed := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}  // any fixed sequence you want
+	// detReader := NewDeterministicReader(seed)
+	// fmt.Print("Generating RSA key pair... ")
+	// privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+	// fmt.Println("done")
+
+
+
+	const keyFile = "private_key.pem"
+    if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+        // Key file does not exist, generate new key
+        privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+        if err != nil {
+            panic(err)
+        }
+        // Save it to file
+        err = SavePrivateKeyToFile(privateKey, keyFile)
+        if err != nil {
+            panic(err)
+        }
+        fmt.Println("Generated and saved new private key.")
+    } else {
+        // Load existing key from file
+        privateKey, err = LoadPrivateKeyFromFile(keyFile)
+        if err != nil {
+            panic(err)
+        }
+        fmt.Println("Loaded private key from file.")
+    }
+
+
 	// if err != nil {
 	// 	log.Fatalf("Failed to generate key: %v", err)
 	// }
-
-	// Try load, else generate and save
-	privateKey, err := loadPrivateKey("private.pem")
-	if err != nil {
-		privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			panic(err)
-		}
-		err = savePrivateKey(privateKey, "private.pem")
-		if err != nil {
-			panic(err)
-		}
-	}
 	publicKey = &privateKey.PublicKey
 
 	http.HandleFunc("/token", tokenHandler)
@@ -72,7 +76,7 @@ func tokenHandler(w http.ResponseWriter, r *http.Request) {
 		"name":  "John Doe",
 		"email": "john@example.com",
 		"iat":   time.Now().Unix(),
-		"exp":   time.Now().Add(1 * time.Hour).Unix(),
+		"exp":   time.Now().Add(1000 * time.Hour).Unix(),
 		"iss":   "http://mock-idp.default.svc.cluster.local",
 		"aud":   "my-client-id",
 	}
@@ -117,30 +121,53 @@ func jwksHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// Save private key to file in PEM format
-func savePrivateKey(key *rsa.PrivateKey, filename string) error {
+
+
+
+
+type DeterministicReader struct {
+	data []byte
+	pos  int
+}
+
+func NewDeterministicReader(seed []byte) *DeterministicReader {
+	return &DeterministicReader{
+		data: seed,
+		pos:  0,
+	}
+}
+
+func (r *DeterministicReader) Read(p []byte) (int, error) {
+	fmt.Print(p)
+	fmt.Print("Length of p: ", len(p))
+	n := len(p)
+	for i := 0; i < n; i++ {
+		p[i] = r.data[r.pos]
+		r.pos = (r.pos + 1) % len(r.data)  // cycle through seed repeatedly
+	}
+	return n, nil
+}
+
+// SavePrivateKeyToFile saves RSA private key to a file in PEM format
+func SavePrivateKeyToFile(key *rsa.PrivateKey, filename string) error {
     keyBytes := x509.MarshalPKCS1PrivateKey(key)
     pemBlock := &pem.Block{
         Type:  "RSA PRIVATE KEY",
         Bytes: keyBytes,
     }
-    file, err := os.Create(filename)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
-    return pem.Encode(file, pemBlock)
+    pemData := pem.EncodeToMemory(pemBlock)
+    return ioutil.WriteFile(filename, pemData, 0600) // permission 600 to keep it private
 }
 
-// Load private key from PEM file
-func loadPrivateKey(filename string) (*rsa.PrivateKey, error) {
-    data, err := os.ReadFile(filename)
+// LoadPrivateKeyFromFile loads RSA private key from PEM file
+func LoadPrivateKeyFromFile(filename string) (*rsa.PrivateKey, error) {
+    pemData, err := ioutil.ReadFile(filename)
     if err != nil {
         return nil, err
     }
-    block, _ := pem.Decode(data)
+    block, _ := pem.Decode(pemData)
     if block == nil || block.Type != "RSA PRIVATE KEY" {
-        return nil, fmt.Errorf("failed to decode PEM block containing private key")
+        return nil, errors.New("failed to decode PEM block containing RSA private key")
     }
     return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
