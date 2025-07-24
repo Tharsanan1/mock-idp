@@ -19,7 +19,19 @@ spec:
           image: mock-idp:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - containerPort: 8443
+          volumeMounts:
+          - mountPath: /idp.key
+            name: idp-ds-tls-volume
+            subPath: tls.key
+          - mountPath: /idp.crt
+            name: idp-ds-tls-volume
+            subPath: tls.crt
+      volumes:
+      - name: idp-ds-tls-volume
+        secret:
+          defaultMode: 420
+          secretName: apk-wso2-kgw-idp-ds-server-cert
 
 ---
 apiVersion: v1
@@ -31,6 +43,6 @@ spec:
     app: mock-idp
   ports:
     - protocol: TCP
-      port: 80
-      targetPort: 8080
+      port: 8443
+      targetPort: 8443
   type: ClusterIP

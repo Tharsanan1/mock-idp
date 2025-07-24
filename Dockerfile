@@ -11,8 +11,8 @@ RUN go mod download
 # Copy the rest of the source
 COPY . .
 
-# Build the app
-RUN go build -o mock-idp .
+# Build the statically linked binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o mock-idp .
 
 # Use a small base image
 FROM gcr.io/distroless/static

@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -25,16 +26,28 @@ var (
 	keyID      = "mock-key-id"
 )
 
+func init() {
+	keyID = os.Getenv("KEY_ID")
+	if keyID == "" {
+		log.Println("KEY_ID environment variable not set, using default mock-key-id")
+		keyID = "mock-key-id"
+	}
+}
+
+type TokenRequest struct {
+	GrantType      string `json:"grant_type"`
+	Code           string `json:"code,omitempty"`
+	RedirectURI    string `json:"redirect_uri,omitempty"`
+	ClientID       string `json:"client_id,omitempty"`
+	ClientSecret   string `json:"client_secret,omitempty"`
+	RefreshToken   string `json:"refresh_token,omitempty"`
+	Scope          string `json:"scope,omitempty"`
+	Username       string `json:"username,omitempty"`
+	Password       string `json:"password,omitempty"`
+	ValidityPeriod int    `json:"validity_period,omitempty"` // You may need to parse this manually if passed as string
+}
+
 func main() {
-	// var err error
-	// seed := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}  // any fixed sequence you want
-	// detReader := NewDeterministicReader(seed)
-	// fmt.Print("Generating RSA key pair... ")
-	// privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
-	// fmt.Println("done")
-
-
-
 	const keyFile = "private_key.pem"
     if _, err := os.Stat(keyFile); os.IsNotExist(err) {
         // Key file does not exist, generate new key
@@ -63,22 +76,75 @@ func main() {
 	// }
 	publicKey = &privateKey.PublicKey
 
-	http.HandleFunc("/token", tokenHandler)
-	http.HandleFunc("/jwks", jwksHandler)
+	http.HandleFunc("/oauth2/token", tokenHandler)
+	http.HandleFunc("/oauth2/jwks", jwksHandler)
+	http.HandleFunc("/health", healthHandler)
 
-	log.Println("Mock IdP running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Mock IdP running on :9443")
+	log.Fatal(http.ListenAndServeTLS(":9443", "idp.crt", "idp.key", nil))
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	response := map[string]string{"status": "healthy"}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }
 
 func tokenHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	var req TokenRequest
+	req.GrantType = r.FormValue("grant_type")
+	req.Code = r.FormValue("code")
+	req.RedirectURI = r.FormValue("redirect_uri")
+	req.ClientID = r.FormValue("client_id")
+	req.ClientSecret = r.FormValue("client_secret")
+	req.RefreshToken = r.FormValue("refresh_token")
+	req.Scope = r.FormValue("scope")
+	req.Username = r.FormValue("username")
+	req.Password = r.FormValue("password")
+
+	if vp := r.FormValue("validity_period"); vp != "" {
+		if val, err := strconv.Atoi(vp); err == nil {
+			req.ValidityPeriod = val
+		}
+	}
+
+	// 🔐 You can now switch based on req.GrantType
+	switch req.GrantType {
+	case "client_credentials":
+		handleClientCredentialsGrant(w, req)
+	case "password":
+		handlePasswordGrant(w, req)
+	case "authorization_code":
+		handleAuthorizationCodeGrant(w, req)
+	case "refresh_token":
+		handleRefreshTokenGrant(w, req)
+	default:
+		http.Error(w, "Unsupported grant type", http.StatusBadRequest)
+	}
+}
+
+func handleClientCredentialsGrant(w http.ResponseWriter, req TokenRequest) {
 	claims := jwt.MapClaims{
-		"sub":   "1234567890",
-		"name":  "John Doe",
-		"email": "john@example.com",
-		"iat":   time.Now().Unix(),
-		"exp":   time.Now().Add(1000 * time.Hour).Unix(),
-		"iss":   "http://mock-idp.default.svc.cluster.local",
-		"aud":   "my-client-id",
+		"sub": "service-account",
+		"aud": req.ClientID,
+		"scope": req.Scope,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iss": "https://your-idp-host",
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -90,14 +156,108 @@ func tokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := map[string]string{
+	resp := map[string]interface{}{
 		"access_token": signedToken,
 		"token_type":   "Bearer",
-		"expires_in":   "3600",
+		"expires_in":   3600,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+func handlePasswordGrant(w http.ResponseWriter, req TokenRequest) {
+	if req.Username == "" || req.Password == "" {
+		http.Error(w, "Username and password are required", http.StatusBadRequest)
+		return
+	}
+	claims := jwt.MapClaims{
+		"sub": req.Username,
+		"aud": req.ClientID,
+		"scope": req.Scope,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iss": "https://your-idp-host",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = keyID
+	signedToken, err := token.SignedString(privateKey)
+	if err != nil {
+		http.Error(w, "Failed to sign token", http.StatusInternalServerError)
+		return
+	}
+	resp := map[string]interface{}{
+		"access_token": signedToken,
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func handleAuthorizationCodeGrant(w http.ResponseWriter, req TokenRequest) {
+	if req.Code == "" || req.RedirectURI == "" {
+		http.Error(w, "Authorization code and redirect URI are required", http.StatusBadRequest)
+		return
+	}
+	// Here you would typically validate the authorization code and redirect URI
+	claims := jwt.MapClaims{
+		"sub": "user-id-from-code",
+		"aud": req.ClientID,
+		"scope": req.Scope,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iss": "https://your-idp-host",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = keyID
+	signedToken, err := token.SignedString(privateKey)
+	if err != nil {
+		http.Error(w, "Failed to sign token", http.StatusInternalServerError)
+		return
+	}
+	resp := map[string]interface{}{
+		"access_token": signedToken,
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+		"refresh_token": "some-refresh-token",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func handleRefreshTokenGrant(w http.ResponseWriter, req TokenRequest) {
+	if req.RefreshToken == "" {
+		http.Error(w, "Refresh token is required", http.StatusBadRequest)
+		return
+	}
+	// Here you would typically validate the refresh token
+	claims := jwt.MapClaims{
+		"sub": "user-id-from-refresh-token",
+		"aud": req.ClientID,
+		"scope": req.Scope,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iss": "https://your-idp-host",
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = keyID
+	signedToken, err := token.SignedString(privateKey)
+	if err != nil {
+		http.Error(w, "Failed to sign token", http.StatusInternalServerError)
+		return
+	}
+	resp := map[string]interface{}{
+		"access_token": signedToken,
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+		"refresh_token": "new-refresh-token",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+
 
 func jwksHandler(w http.ResponseWriter, r *http.Request) {
 	n := base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes())
